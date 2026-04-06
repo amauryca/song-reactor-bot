@@ -14,9 +14,11 @@ Website control:
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.parse
 import urllib.request
 from uuid import uuid4
@@ -37,7 +39,7 @@ WHISPER_MODEL = "tiny"  # tiny keeps memory low on free hosting tiers
 GROQ_MODEL = "llama3-8b-8192"
 MAX_LIVE_LYRICS_CHARS = 900
 LIVE_CHUNK_MS = 2500
-LIVE_BPM_EVERY_N_CHUNKS = 2
+LIVE_BPM_EVERY_N_CHUNKS = 3
 MAX_UPLOAD_MB = 20
 LIVE_SESSION_TTL_SECONDS = 15 * 60
 MAX_LIVE_SESSIONS = 12
@@ -81,14 +83,17 @@ def _get_whisper_model():
         if now - session.get("updated_at", now) > LIVE_SESSION_TTL_SECONDS
       ]
       for session_id in expired:
+        print(f"[CLEANUP] Expired session: {session_id}")
         LIVE_SESSIONS.pop(session_id, None)
 
       if len(LIVE_SESSIONS) > MAX_LIVE_SESSIONS:
+        print(f"[WARNING] Too many live sessions ({len(LIVE_SESSIONS)}), max is {MAX_LIVE_SESSIONS}")
         oldest = sorted(
           LIVE_SESSIONS.items(),
           key=lambda item: item[1].get("updated_at", 0),
         )
         for session_id, _ in oldest[: len(LIVE_SESSIONS) - MAX_LIVE_SESSIONS]:
+          print(f"[CLEANUP] Evicted oldest session: {session_id}")
           LIVE_SESSIONS.pop(session_id, None)
 
 
@@ -131,33 +136,79 @@ def search_wikimedia_images(query: str, limit: int = 8) -> list[dict]:
     return images
 
 
-def transcribe(audio_path: str) -> str:
-    model = _get_whisper_model()
-    # Prefer low-latency decoding options for short live chunks.
+def _convert_audio_to_wav(input_path: str) -> str:
+    """Convert any audio format to WAV using ffmpeg for Whisper/Librosa compatibility."""
+    output_path = input_path + ".wav"
     try:
-        result = model.transcribe(
-            audio_path,
-            fp16=False,
-            condition_on_previous_text=False,
-            temperature=0.0,
-            without_timestamps=True,
+        subprocess.run(
+            ["ffmpeg", "-i", input_path, "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", output_path, "-y"],
+            capture_output=True,
+            timeout=30,
+            check=True,
         )
-    except TypeError:
-        # Fallback for older whisper builds without without_timestamps.
-        result = model.transcribe(
-            audio_path,
-            fp16=False,
-            condition_on_previous_text=False,
-            temperature=0.0,
-        )
-    return result.get("text", "").strip()
+        return output_path
+    except Exception as e:
+        print(f"[ERROR] Audio conversion failed: {e}")
+        raise
+
+def transcribe(audio_path: str) -> str:
+    """Transcribe audio file using Whisper. Converts to WAV first if needed."""
+    try:
+        # Convert to WAV if not already in that format
+        if not audio_path.endswith(".wav"):
+            print(f"[AUDIO] Converting {audio_path} to WAV format...")
+            audio_path = _convert_audio_to_wav(audio_path)
+        
+        model = _get_whisper_model()
+        print(f"[TRANSCRIBE] Processing {audio_path}...")
+        
+        # Prefer low-latency decoding options for short live chunks.
+        try:
+            result = model.transcribe(
+                audio_path,
+                fp16=False,
+                condition_on_previous_text=False,
+                temperature=0.0,
+                without_timestamps=True,
+            )
+        except TypeError:
+            # Fallback for older whisper builds without without_timestamps.
+            result = model.transcribe(
+                audio_path,
+                fp16=False,
+                condition_on_previous_text=False,
+                temperature=0.0,
+            )
+        
+        text = result.get("text", "").strip()
+        print(f"[TRANSCRIBE] Result: {len(text)} characters")
+        return text
+    except Exception as e:
+        print(f"[ERROR] Transcription failed: {e}")
+        print(traceback.format_exc())
+        raise
 
 
 def detect_bpm(audio_path: str) -> float:
-    # Keep BPM analysis lighter by downsampling for live chunks.
-    y, sr = librosa.load(audio_path, mono=True, sr=22050)
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    return round(float(tempo), 1)
+    """Detect BPM using Librosa. Converts to WAV first if needed."""
+    try:
+        # Convert to WAV if not already in that format
+        if not audio_path.endswith(".wav"):
+            print(f"[AUDIO] Converting {audio_path} to WAV format for BPM...")
+            audio_path = _convert_audio_to_wav(audio_path)
+        
+        print(f"[BPM] Analyzing {audio_path}...")
+        # Keep BPM analysis lighter by downsampling for live chunks.
+        y, sr = librosa.load(audio_path, mono=True, sr=22050)
+        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        bpm = round(float(tempo), 1)
+        print(f"[BPM] Result: {bpm}")
+        return bpm
+    except Exception as e:
+        print(f"[ERROR] BPM detection failed: {e}")
+        print(traceback.format_exc())
+        # Return a safe default if BPM fails
+        return 0.0
 
 
 def _merge_lyrics(existing: str, chunk_text: str) -> str:
@@ -223,10 +274,19 @@ def get_groq_reaction(
 
 
 def _save_upload_to_temp(audio_file) -> str:
+    """Save uploaded audio file to temp location. Returns path."""
     suffix = os.path.splitext(audio_file.filename)[1] or ".webm"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         path = tmp.name
         audio_file.save(path)
+    
+    # Verify file was written
+    file_size = os.path.getsize(path)
+    print(f"[AUDIO] Saved {audio_file.filename} to {path} ({file_size} bytes)")
+    
+    if file_size < 1000:
+        print(f"[WARNING] Audio file is suspiciously small ({file_size} bytes)")
+    
     return path
 
 
@@ -606,31 +666,51 @@ def image_search():
 
 @app.route("/react", methods=["POST"])
 def react_once():
+    print("[REACT] One-shot reaction started")
     api_key = _get_api_key()
     if api_key == "YOUR_GROQ_API_KEY":
+        print("[ERROR] GROQ_API_KEY not configured")
         return jsonify({"error": "GROQ_API_KEY not configured on server"}), 500
 
     if "audio" not in request.files:
+        print("[ERROR] No audio file in request")
         return jsonify({"error": "No 'audio' file field found in request"}), 400
 
     audio_file = request.files["audio"]
     if audio_file.filename == "":
+        print("[ERROR] Empty filename")
         return jsonify({"error": "Empty filename"}), 400
 
     image_title = request.form.get("image_title", "")
     image_url = request.form.get("image_url", "")
     preset_style = request.form.get("preset_style", "")
 
-    tmp_path = _save_upload_to_temp(audio_file)
+    tmp_path = None
     try:
+        tmp_path = _save_upload_to_temp(audio_file)
+        print(f"[REACT] Transcribing audio...")
         lyrics = transcribe(tmp_path)
+        print(f"[REACT] Lyrics: {lyrics[:100]}...")
+        
+        print(f"[REACT] Detecting BPM...")
         bpm = detect_bpm(tmp_path)
+        print(f"[REACT] BPM: {bpm}")
+        
+        print(f"[REACT] Generating reaction...")
         reaction = get_groq_reaction(lyrics, bpm, api_key, image_title, image_url, preset_style)
+        print(f"[REACT] Reaction generated successfully")
         return jsonify({"bpm": bpm, "lyrics": lyrics, "reaction": reaction})
     except Exception as exc:
+        print(f"[ERROR] React failed: {exc}")
+        print(traceback.format_exc())
         return jsonify({"error": str(exc)}), 500
     finally:
-        os.unlink(tmp_path)
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+                print(f"[CLEANUP] Removed {tmp_path}")
+            except Exception as e:
+                print(f"[WARNING] Failed to clean up {tmp_path}: {e}")
 
 
 @app.route("/live/start", methods=["POST"])
@@ -657,18 +737,22 @@ def live_start():
 
 @app.route("/live/chunk", methods=["POST"])
 def live_chunk():
+    print(f"[LIVE-CHUNK] Received chunk")
     api_key = _get_api_key()
     _cleanup_live_sessions()
     session_id = request.form.get("session_id", "")
     session = LIVE_SESSIONS.get(session_id)
     if not session:
+        print(f"[ERROR] Invalid session: {session_id}")
         return jsonify({"error": "Invalid or expired live session"}), 400
 
     if "audio" not in request.files:
+        print(f"[ERROR] No audio file in live chunk request")
         return jsonify({"error": "No 'audio' in live chunk"}), 400
 
     audio_file = request.files["audio"]
     if audio_file.filename == "":
+        print(f"[ERROR] Empty audio filename in live chunk")
         return jsonify({"error": "Empty live audio chunk"}), 400
 
     # Keep latest style controls from the web panel.
@@ -677,10 +761,13 @@ def live_chunk():
     session["preset_style"] = request.form.get("preset_style", session["preset_style"])
     session["updated_at"] = time.time()
 
-    tmp_path = _save_upload_to_temp(audio_file)
+    tmp_path = None
     try:
+        tmp_path = _save_upload_to_temp(audio_file)
+        print(f"[LIVE-CHUNK] Transcribing chunk #{session['chunk_index'] + 1}...")
         chunk_lyrics = transcribe(tmp_path)
         session["chunk_index"] += 1
+        print(f"[LIVE-CHUNK] Lyrics: {chunk_lyrics[:80]}...")
 
         # Compute BPM every N chunks to reduce CPU load in live mode.
         should_refresh_bpm = (
@@ -688,8 +775,10 @@ def live_chunk():
             or session["chunk_index"] % LIVE_BPM_EVERY_N_CHUNKS == 0
         )
         if should_refresh_bpm:
+            print(f"[LIVE-CHUNK] Detecting BPM for chunk #{session['chunk_index']}...")
             bpm_current = detect_bpm(tmp_path)
             session["last_bpm_current"] = bpm_current
+            print(f"[LIVE-CHUNK] BPM: {bpm_current}")
         else:
             bpm_current = session.get("last_bpm_current", 0.0)
 
@@ -698,8 +787,9 @@ def live_chunk():
 
         session["lyrics"] = _merge_lyrics(session["lyrics"], chunk_lyrics)
 
-        bpm_avg = round(sum(session["bpm_values"]) / len(session["bpm_values"]), 1)
+        bpm_avg = round(sum(session["bpm_values"]) / len(session["bpm_values"]), 1) if session["bpm_values"] else 0.0
         live_hint = f"Chunk #{session['chunk_index']} in an ongoing live stream. React as if this is happening now."
+        print(f"[LIVE-CHUNK] Generating reaction...")
         reaction = get_groq_reaction(
             session["lyrics"],
             bpm_avg,
@@ -711,6 +801,7 @@ def live_chunk():
             live_mode=True,
         )
         session["last_reaction"] = reaction
+        print(f"[LIVE-CHUNK] Chunk #{session['chunk_index']} processed successfully")
 
         return jsonify(
             {
@@ -723,9 +814,23 @@ def live_chunk():
             }
         )
     except Exception as exc:
+        print(f"[ERROR] Live chunk failed: {exc}")
+        print(traceback.format_exc())
         return jsonify({"error": str(exc)}), 500
     finally:
-        os.unlink(tmp_path)
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+                print(f"[CLEANUP] Removed {tmp_path}")
+            except Exception as e:
+                print(f"[WARNING] Failed to clean up {tmp_path}: {e}")
+        # Also clean up any converted WAV file
+        if tmp_path and os.path.exists(tmp_path + ".wav"):
+            try:
+                os.unlink(tmp_path + ".wav")
+                print(f"[CLEANUP] Removed {tmp_path}.wav")
+            except Exception as e:
+                print(f"[WARNING] Failed to clean up {tmp_path}.wav: {e}")
 
 
 @app.route("/live/stop", methods=["POST"])
