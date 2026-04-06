@@ -23,7 +23,7 @@ from groq import Groq
 # ---------------------------------------------------------------------------
 # CONFIG — edit these before running locally
 # ---------------------------------------------------------------------------
-RECORD_SECONDS = 30              # How many seconds to record from the microphone
+RECORD_SECONDS = 45              # How many seconds to record from the microphone
 SAMPLE_RATE = 44100              # Standard audio sample rate
 GROQ_API_KEY = "YOUR_GROQ_API_KEY"  # Set via GROQ_API_KEY env var instead
 WHISPER_MODEL = "tiny"           # tiny = fits Render free 512 MB RAM; use base locally
