@@ -5,6 +5,10 @@ openai-whisper
 librosa
 soundfile
 
+# Microphone recording
+sounddevice
+scipy
+
 # Groq API — free tier, extremely fast inference
 groq
 

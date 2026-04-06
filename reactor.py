@@ -2,7 +2,8 @@
 reactor.py — AI Song Reactor Bot (TikTok Live Edition)
 Uses Whisper (local) + Librosa + Groq to react to a song for TikTok Live.
 
-Run locally:  python reactor.py song.mp3
+Run locally (mic):  python reactor.py
+Run locally (file): python reactor.py song.mp3
 Hosted (gunicorn / Render): gunicorn reactor:app
   POST an MP3 via multipart form to /react  (field name: "audio")
   curl -X POST https://your-app.onrender.com/react -F "audio=@song.mp3"
@@ -13,14 +14,18 @@ import os
 import tempfile
 import whisper
 import librosa
+import numpy as np
+import sounddevice as sd
+import scipy.io.wavfile as wav
 from flask import Flask, request, jsonify
 from groq import Groq
 
 # ---------------------------------------------------------------------------
 # CONFIG — edit these before running locally
 # ---------------------------------------------------------------------------
-AUDIO_FILE = "song.mp3"          # Default local MP3 (CLI mode only)
-GROQ_API_KEY = "YOUR_GROQ_API_KEY"  # Free key at console.groq.com
+RECORD_SECONDS = 30              # How many seconds to record from the microphone
+SAMPLE_RATE = 44100              # Standard audio sample rate
+GROQ_API_KEY = "YOUR_GROQ_API_KEY"  # Set via GROQ_API_KEY env var instead
 WHISPER_MODEL = "tiny"           # tiny = fits Render free 512 MB RAM; use base locally
 GROQ_MODEL = "llama3-8b-8192"    # Free Groq model (very fast)
 # ---------------------------------------------------------------------------
@@ -125,6 +130,26 @@ def react():
 
 
 # ---------------------------------------------------------------------------
+# Microphone recording
+# ---------------------------------------------------------------------------
+
+def record_from_mic(duration: int = RECORD_SECONDS) -> str:
+    print(f"[MIC] Recording for {duration} seconds... 🎤 Play your song now!")
+    audio = sd.rec(
+        int(duration * SAMPLE_RATE),
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype=np.int16,
+    )
+    sd.wait()  # Block until recording is done
+    print("[MIC] Recording complete.\n")
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    wav.write(tmp.name, SAMPLE_RATE, audio)
+    return tmp.name
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point (local use only)
 # ---------------------------------------------------------------------------
 
@@ -135,15 +160,24 @@ def main():
         print("Free key at https://console.groq.com")
         sys.exit(1)
 
-    audio_path = sys.argv[1] if len(sys.argv) > 1 else AUDIO_FILE
-    if not os.path.isfile(audio_path):
-        print(f"Error: File '{audio_path}' not found.")
-        print("Usage: python reactor.py path/to/song.mp3")
-        sys.exit(1)
+    # If a file path is passed as an argument, use it; otherwise record from mic
+    if len(sys.argv) > 1:
+        audio_path = sys.argv[1]
+        if not os.path.isfile(audio_path):
+            print(f"Error: File '{audio_path}' not found.")
+            sys.exit(1)
+        cleanup = False
+    else:
+        audio_path = record_from_mic()
+        cleanup = True  # Temp file — delete after processing
 
-    lyrics = transcribe(audio_path)
-    bpm = detect_bpm(audio_path)
-    reaction = get_groq_reaction(lyrics, bpm, api_key)
+    try:
+        lyrics = transcribe(audio_path)
+        bpm = detect_bpm(audio_path)
+        reaction = get_groq_reaction(lyrics, bpm, api_key)
+    finally:
+        if cleanup:
+            os.unlink(audio_path)
 
     print("=" * 60)
     print("TIKTOK LIVE REACTION 🎵")
@@ -153,6 +187,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Running directly → CLI mode
+    # Running directly → CLI mode (mic or file)
     # Running via gunicorn → gunicorn imports `app` directly (main() is never called)
     main()
