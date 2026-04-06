@@ -1,0 +1,8 @@
+# Server-side dependencies for Render deployment
+openai-whisper
+librosa
+soundfile
+groq
+flask
+gunicorn
+ffmpeg-python

@@ -15,8 +15,8 @@ RUN apt-get update && \
 WORKDIR /app
 
 # Install dependencies first (better layer caching)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-render.txt .
+RUN pip install --no-cache-dir -r requirements-render.txt
 
 # Copy app code
 COPY reactor.py .

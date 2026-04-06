@@ -745,8 +745,14 @@ def live_stop():
 # ---------------------------------------------------------------------------
 
 def record_from_mic(duration: int = RECORD_SECONDS) -> str:
+  try:
     import scipy.io.wavfile as wav
     import sounddevice as sd
+  except Exception as exc:
+    print("Local microphone mode requires sounddevice and PortAudio.")
+    print("Install local deps with: pip install sounddevice scipy")
+    print(f"Underlying error: {exc}")
+    sys.exit(1)
 
     print(f"[MIC] Recording for {duration} seconds. Play your song now...")
     audio = sd.rec(
