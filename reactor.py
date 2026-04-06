@@ -36,8 +36,9 @@ SAMPLE_RATE = 44100
 GROQ_API_KEY = "YOUR_GROQ_API_KEY"
 WHISPER_MODEL = "tiny"  # tiny keeps memory low on free hosting tiers
 GROQ_MODEL = "llama3-8b-8192"
-MAX_LIVE_LYRICS_CHARS = 2500
-LIVE_CHUNK_MS = 4000
+MAX_LIVE_LYRICS_CHARS = 900
+LIVE_CHUNK_MS = 2500
+LIVE_BPM_EVERY_N_CHUNKS = 2
 # ---------------------------------------------------------------------------
 
 TIKTOK_SYSTEM_PROMPT = """
@@ -110,12 +111,29 @@ def search_wikimedia_images(query: str, limit: int = 8) -> list[dict]:
 
 def transcribe(audio_path: str) -> str:
     model = _get_whisper_model()
-    result = model.transcribe(audio_path)
+    # Prefer low-latency decoding options for short live chunks.
+    try:
+        result = model.transcribe(
+            audio_path,
+            fp16=False,
+            condition_on_previous_text=False,
+            temperature=0.0,
+            without_timestamps=True,
+        )
+    except TypeError:
+        # Fallback for older whisper builds without without_timestamps.
+        result = model.transcribe(
+            audio_path,
+            fp16=False,
+            condition_on_previous_text=False,
+            temperature=0.0,
+        )
     return result.get("text", "").strip()
 
 
 def detect_bpm(audio_path: str) -> float:
-    y, sr = librosa.load(audio_path, mono=True)
+    # Keep BPM analysis lighter by downsampling for live chunks.
+    y, sr = librosa.load(audio_path, mono=True, sr=22050)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     return round(float(tempo), 1)
 
@@ -135,6 +153,7 @@ def get_groq_reaction(
     image_url: str = "",
     preset_style: str = "",
     live_hint: str = "",
+    live_mode: bool = False,
 ) -> str:
     client = Groq(api_key=api_key)
 
@@ -164,13 +183,18 @@ def get_groq_reaction(
         + "React to this song for TikTok Live right now."
     )
 
+    max_tokens = 220
+    if live_mode:
+        prompt += "\n\nKeep this update ultra-short (2-3 lines)."
+        max_tokens = 110
+
     response = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[
             {"role": "system", "content": TIKTOK_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=220,
+        max_tokens=max_tokens,
         temperature=0.9,
     )
     return response.choices[0].message.content.strip()
@@ -585,6 +609,7 @@ def live_start():
         "lyrics": "",
         "bpm_values": [],
         "chunk_index": 0,
+      "last_bpm_current": 0.0,
         "image_title": "",
         "image_url": "",
         "preset_style": "",
@@ -616,11 +641,23 @@ def live_chunk():
     tmp_path = _save_upload_to_temp(audio_file)
     try:
         chunk_lyrics = transcribe(tmp_path)
-        bpm_current = detect_bpm(tmp_path)
+        session["chunk_index"] += 1
+
+        # Compute BPM every N chunks to reduce CPU load in live mode.
+        should_refresh_bpm = (
+            session["chunk_index"] == 1
+            or session["chunk_index"] % LIVE_BPM_EVERY_N_CHUNKS == 0
+        )
+        if should_refresh_bpm:
+            bpm_current = detect_bpm(tmp_path)
+            session["last_bpm_current"] = bpm_current
+        else:
+            bpm_current = session.get("last_bpm_current", 0.0)
+
+        if bpm_current > 0:
+            session["bpm_values"].append(bpm_current)
 
         session["lyrics"] = _merge_lyrics(session["lyrics"], chunk_lyrics)
-        session["bpm_values"].append(bpm_current)
-        session["chunk_index"] += 1
 
         bpm_avg = round(sum(session["bpm_values"]) / len(session["bpm_values"]), 1)
         live_hint = f"Chunk #{session['chunk_index']} in an ongoing live stream. React as if this is happening now."
@@ -632,6 +669,7 @@ def live_chunk():
             session["image_url"],
             session["preset_style"],
             live_hint=live_hint,
+            live_mode=True,
         )
         session["last_reaction"] = reaction
 
