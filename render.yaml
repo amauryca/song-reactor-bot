@@ -4,6 +4,13 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
     envVars:
       - key: GROQ_API_KEY
         sync: false   # You will paste the value in the Render dashboard
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: TMPDIR
+        value: /tmp
+      - key: WHISPER_CACHE_DIR
+        value: /tmp/whisper

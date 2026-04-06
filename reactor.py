@@ -16,14 +16,13 @@ import json
 import os
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from uuid import uuid4
 
 import librosa
 import numpy as np
-import scipy.io.wavfile as wav
-import sounddevice as sd
 import whisper
 from flask import Flask, jsonify, request
 from groq import Groq
@@ -39,6 +38,9 @@ GROQ_MODEL = "llama3-8b-8192"
 MAX_LIVE_LYRICS_CHARS = 900
 LIVE_CHUNK_MS = 2500
 LIVE_BPM_EVERY_N_CHUNKS = 2
+MAX_UPLOAD_MB = 20
+LIVE_SESSION_TTL_SECONDS = 15 * 60
+MAX_LIVE_SESSIONS = 12
 # ---------------------------------------------------------------------------
 
 TIKTOK_SYSTEM_PROMPT = """
@@ -53,6 +55,7 @@ Keep it under 120 words.
 """.strip()
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 
 _WHISPER_MODEL_CACHE = None
 LIVE_SESSIONS = {}
@@ -68,6 +71,25 @@ def _get_whisper_model():
         print(f"[INIT] Loading Whisper model '{WHISPER_MODEL}'...")
         _WHISPER_MODEL_CACHE = whisper.load_model(WHISPER_MODEL)
     return _WHISPER_MODEL_CACHE
+
+
+    def _cleanup_live_sessions() -> None:
+      now = time.time()
+      expired = [
+        session_id
+        for session_id, session in LIVE_SESSIONS.items()
+        if now - session.get("updated_at", now) > LIVE_SESSION_TTL_SECONDS
+      ]
+      for session_id in expired:
+        LIVE_SESSIONS.pop(session_id, None)
+
+      if len(LIVE_SESSIONS) > MAX_LIVE_SESSIONS:
+        oldest = sorted(
+          LIVE_SESSIONS.items(),
+          key=lambda item: item[1].get("updated_at", 0),
+        )
+        for session_id, _ in oldest[: len(LIVE_SESSIONS) - MAX_LIVE_SESSIONS]:
+          LIVE_SESSIONS.pop(session_id, None)
 
 
 def search_wikimedia_images(query: str, limit: int = 8) -> list[dict]:
@@ -216,6 +238,11 @@ def index():
             "usage": "Open /control for website UI",
         }
     )
+
+
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    return jsonify({"ok": True, "live_sessions": len(LIVE_SESSIONS)})
 
 
 @app.route("/control", methods=["GET"])
@@ -604,16 +631,18 @@ def live_start():
     if api_key == "YOUR_GROQ_API_KEY":
         return jsonify({"error": "GROQ_API_KEY not configured on server"}), 500
 
+    _cleanup_live_sessions()
     session_id = str(uuid4())
     LIVE_SESSIONS[session_id] = {
         "lyrics": "",
         "bpm_values": [],
         "chunk_index": 0,
-      "last_bpm_current": 0.0,
+        "last_bpm_current": 0.0,
         "image_title": "",
         "image_url": "",
         "preset_style": "",
         "last_reaction": "",
+        "updated_at": time.time(),
     }
     return jsonify({"session_id": session_id})
 
@@ -621,6 +650,7 @@ def live_start():
 @app.route("/live/chunk", methods=["POST"])
 def live_chunk():
     api_key = _get_api_key()
+    _cleanup_live_sessions()
     session_id = request.form.get("session_id", "")
     session = LIVE_SESSIONS.get(session_id)
     if not session:
@@ -637,6 +667,7 @@ def live_chunk():
     session["image_title"] = request.form.get("image_title", session["image_title"])
     session["image_url"] = request.form.get("image_url", session["image_url"])
     session["preset_style"] = request.form.get("preset_style", session["preset_style"])
+    session["updated_at"] = time.time()
 
     tmp_path = _save_upload_to_temp(audio_file)
     try:
@@ -714,6 +745,9 @@ def live_stop():
 # ---------------------------------------------------------------------------
 
 def record_from_mic(duration: int = RECORD_SECONDS) -> str:
+    import scipy.io.wavfile as wav
+    import sounddevice as sd
+
     print(f"[MIC] Recording for {duration} seconds. Play your song now...")
     audio = sd.rec(
         int(duration * SAMPLE_RATE),
