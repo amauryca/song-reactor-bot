@@ -508,15 +508,22 @@ def control_page():
       if (liveSessionId) return;
       const liveStatus = document.getElementById('liveStatus');
 
-      const startRes = await fetch('/live/start', {{ method: 'POST' }});
-      const startData = await startRes.json();
-      if (!startRes.ok) {{
+      try {{
+        const startRes = await fetch('/live/start', {{ method: 'POST' }});
+        if (!startRes.ok) {{
+          const error = await startRes.json();
+          liveStatus.className = 'statusWarn';
+          liveStatus.textContent = 'Live start failed: ' + (error.error || 'unknown error');
+          return;
+        }}
+        const startData = await startRes.json();
+        liveSessionId = startData.session_id;
+      }} catch (err) {{
+        console.error('Failed to start live session:', err);
         liveStatus.className = 'statusWarn';
-        liveStatus.textContent = 'Live start failed: ' + (startData.error || 'unknown error');
+        liveStatus.textContent = 'Live start error: ' + err;
         return;
       }}
-
-      liveSessionId = startData.session_id;
 
       try {{
         micStream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
@@ -547,10 +554,11 @@ def control_page():
           }}
         }};
 
-        mediaRecorder.start({LIVE_CHUNK_MS});
+        mediaRecorder.start({int(LIVE_CHUNK_MS)});
         liveStatus.className = 'statusOk';
-        liveStatus.textContent = 'Live: running (sending chunks every {LIVE_CHUNK_MS/1000:.0f}s)';
+        liveStatus.textContent = 'Live: running (sending chunks every {int(LIVE_CHUNK_MS/1000)}s)';
       }} catch (err) {{
+        console.error('Live mode error:', err);
         await stopLive();
         liveStatus.className = 'statusWarn';
         liveStatus.textContent = 'Live mic error: ' + err;
