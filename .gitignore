@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Audio files — don't commit MP3s to git
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+
+# Whisper model cache
+~/.cache/whisper/
+
+# Environment variables
+.env
+
+# macOS
+.DS_Store

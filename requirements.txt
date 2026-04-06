@@ -1,0 +1,16 @@
+# Audio transcription (Whisper by OpenAI — runs locally, 100% free)
+openai-whisper
+
+# Audio analysis (BPM / tempo detection)
+librosa
+soundfile
+
+# Groq API — free tier, extremely fast inference
+groq
+
+# Utility — needed by Whisper for MP3 decoding
+ffmpeg-python
+
+# Web server (for hosting / live endpoint)
+flask
+gunicorn

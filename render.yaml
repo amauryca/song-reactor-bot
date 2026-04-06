@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: song-reactor-bot
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false   # You will paste the value in the Render dashboard
